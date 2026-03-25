@@ -18,7 +18,7 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ secrets.ACCESS_TOKEN }}
-          PROD: 0
+          PROD: 1
           REPO: NixOS/nixpkgs
           TEAM: NixOS/security-review
           ORG: NixOS
