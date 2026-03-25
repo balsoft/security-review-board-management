@@ -80,42 +80,108 @@ jobs:
           log "Adding not-yet-added issues where the team was mentioned"
           declare -p issues
           for issueId in "${!issues[@]}"; do
-            log "Adding $issueId (https://github.com/$REPO/issue/${issues[$issueId]})"
+            log "+ Adding $issueId (https://github.com/$REPO/issue/${issues[$issueId]})"
             addItem Issue "$issueId"
           done
 
-
-          log "Fetching all PRs already added to the project"
-          if ! >"$tmp/out" gh api --paginate "/orgs/$ORG/projectsV2/$PROJECT_NUMBER/items" \
-            --jq ".[] | select(.content_type == \"PullRequest\" and .content.base.repo.full_name == \"$REPO\") .content.number"; then
-            log "Failed: $(<"$tmp/out")"
+          log "Fetching PRs which have been updated since last review"
+          pull_request_query='
+          query($org: String!, $projectNumber: Int!, $endCursor: String) {
+            organization(login: $org) {
+              projectV2(number: $projectNumber) {
+                id
+                field(name: "Status") {
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    options {
+                      name
+                      id
+                    }
+                  }
+                }
+                items(first: 100, after: $endCursor, query: "is:pr") {
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
+                  nodes {
+                    id
+                    updatedAt
+                    fieldValueByName(name: "Status") {
+                      ... on ProjectV2ItemFieldSingleSelectValue {
+                        name
+                      }
+                    }
+                    content {
+                      ... on PullRequest {
+                        url
+                        timelineItems(itemTypes: [PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT], last: 1) {
+                          updatedAt
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          '
+          if ! >"$tmp/prs.json" gh api graphql --paginate -F "query=$pull_request_query" -F org="$ORG" -F projectNumber="$PROJECT_NUMBER"; then
+            log "Failed: $(<"$tmp/prs.json")"
             exit 1
           fi
-          declare -a items=()
-          while read -r number; do
-            items[number]=
-          done < "$tmp/out"
-          log "Got ${#items[@]} project items"
 
-          log "Fetching PRs and filtering for ones not yet added to the project"
+          update_field_mutation='
+          mutation ($projectId: ID!, $itemId: ID!, $fieldId: ID!, $selectId: String!) {
+            updateProjectV2ItemFieldValue(
+              input: {
+                projectId: $projectId
+                fieldId: $fieldId
+                itemId: $itemId
+                value: { singleSelectOptionId: $selectId }
+              }
+            ) {
+              projectV2Item {
+                id
+              }
+            }
+          }
+          '
+
+          project_id="$(jq -r ".data.organization.projectV2.id" "$tmp/prs.json")"
+          field_id="$(jq -r ".data.organization.projectV2.field.id" "$tmp/prs.json")"
+          select_id="$(jq -r ".data.organization.projectV2.field.options | .[] | select(.name == \"Needs Re-review\") | .id" "$tmp/prs.json")"
+
+          while read item_id pr_url; do
+            log "~ Moving PR $pr_url to \"Needs Re-review\""
+            if ! >"$tmp/out" gh api graphql -F "query=$update_field_mutation" -F "projectId=$project_id" -F "itemId=$item_id" -F "fieldId=$field_id" -F "selectId=$select_id"; then
+              echo "Failed: $(<"$tmp/out")"
+              exit 1
+            fi
+          done < <(
+            jq -r '.data.organization.projectV2.items.nodes
+              | .[]
+              | select(.fieldValueByName.name == "Reviewed" and .updatedAt <= .content.timelineItems.updatedAt)
+              | (.id + " " + .content.url)' \
+             "$tmp/prs.json"
+          )
+
+          log "Fetching all not-yet-added PRs"
           declare -a prs=()
           while read -r _issueId number; do
-            # Only add items we don't already have
-            if [[ ! -v items[number] ]]; then
-              log "Fetching PR id for https://github.com/$REPO/pull/$number"
-              prId="$(gh api "/repos/$REPO/pulls/$number" --jq .id)"
-              prs[prId]=$number
-            fi
+            log "* Fetching PR id for https://github.com/$REPO/pull/$number"
+            prId="$(gh api "/repos/$REPO/pulls/$number" --jq .id)"
+            prs[prId]=$number
           done < <({
             log "Fetching all PRs where the team was mentioned"
-            searchIssues team:"$TEAM" is:pr
+            searchIssues team:"$TEAM" is:pr -project:$ORG/$PROJECT_NUMBER
             log "Fetching all PRs where the team was requested for review"
-            searchIssues team-review-requested:"$TEAM" is:pr
+            searchIssues team-review-requested:"$TEAM" is:pr -project:$ORG/$PROJECT_NUMBER
           })
 
           log "Adding not-yet-added PRs where the team was mentioned or requested for review"
           declare -p prs
           for prId in "${!prs[@]}"; do
-            log "Adding $prId (https://github.com/$REPO/pull/${prs[prId]})"
+            log "+ Adding PR https://github.com/$REPO/pull/${prs[prId]}"
             addItem PullRequest "$prId"
           done
