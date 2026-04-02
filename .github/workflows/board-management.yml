@@ -2,8 +2,8 @@ name: Project board management
 
 on:
   schedule:
-    # Everyday at 18:09 (randomly chosen)
-    - cron: '09 18 * * *'
+    # Hourly at 9 minutes past the hour
+    - cron: '09 * * * *'
   workflow_dispatch:
 
 permissions: {}
